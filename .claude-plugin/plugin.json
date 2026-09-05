@@ -1,0 +1,11 @@
+{
+  "name": "jumia-vendor-mcp",
+  "description": "MCP server for the Jumia Vendor Center GPM (catalog) and GOP (orders) APIs",
+  "version": "0.1.0",
+  "mcpServers": {
+    "jumia-vendor-center": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/src/server.ts"]
+    }
+  }
+}

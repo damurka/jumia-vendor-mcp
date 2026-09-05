@@ -1,0 +1,23 @@
+{
+  "name": "jumia-vendor-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for the Jumia Vendor Center GPM (catalog) and GOP (orders) APIs",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/server.ts",
+    "setup": "node src/setup.ts",
+    "test": "node --test \"tests/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "zod": "^4.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "typescript": "^7.0.2"
+  }
+}

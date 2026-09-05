@@ -1,0 +1,13 @@
+{
+  "name": "jumia-vendor-mcp",
+  "owner": {
+    "name": "damurka"
+  },
+  "plugins": [
+    {
+      "name": "jumia-vendor-mcp",
+      "source": "./",
+      "description": "MCP server for the Jumia Vendor Center GPM (catalog) and GOP (orders) APIs"
+    }
+  ]
+}
