@@ -36,8 +36,23 @@ before you rely on those.
    Application, this needs no human present to log in - required for a
    server that runs unattended/on a schedule.
 2. Use **Generate Token** on that application to get a Refresh Token.
-3. Install dependencies, then run `node src/setup.ts` and paste the Client
-   Id and Refresh Token when prompted:
+3. Enter the Client Id and Refresh Token one of two ways:
+
+   **If you installed this as a Claude Code plugin**, the fastest path needs
+   no separate terminal step at all - inside a Claude Code session, run the
+   `/plugin configure jumia-vendor-mcp` slash command and fill in the two
+   fields it prompts for (this is a slash command, not a `claude plugin ...`
+   shell subcommand - the CLI itself has no `configure` verb). The Refresh
+   Token goes into Claude Code's own
+   secure credential storage (it's declared `"sensitive": true` in
+   `.claude-plugin/plugin.json`'s `userConfig`), never written to a plaintext
+   file in this project. `npm install` still needs to have been run once in
+   the plugin's own directory first, same as the CLI path below.
+
+   **Otherwise** (running this repo directly, or you prefer a CLI flow with
+   live pre-validation before anything is saved), install dependencies, then
+   run `node src/setup.ts` and paste the Client Id and Refresh Token when
+   prompted:
 
    ```bash
    npm install
@@ -102,12 +117,15 @@ Or, for one-off/dev use without installing anything:
 claude --plugin-dir /absolute/path/to/jumia-vendor-mcp
 ```
 
-Credentials come from `~/.config/jumia-vendor-mcp/credentials.json` (see
-**Setup** above), which isn't tied to `${CLAUDE_PLUGIN_ROOT}` at all - run
-`node src/setup.ts` once and every install of this plugin on that machine
-picks it up, regardless of where it's cloned. `npm install` still needs to
-have been run once in the plugin's own directory first, though - see the
-note at the end of **Setup** above.
+Enter credentials via the `/plugin configure jumia-vendor-mcp` slash command
+inside a session (see **Setup** above) - this is the path made for exactly this install method,
+since `plugin.json`'s `userConfig` is what powers that command. The older
+`node src/setup.ts` / `~/.config/jumia-vendor-mcp/credentials.json` path
+still works too and isn't tied to `${CLAUDE_PLUGIN_ROOT}` at all - run it
+once and every install of this plugin on that machine picks it up,
+regardless of where it's cloned. Either way, `npm install` still needs to
+have been run once in the plugin's own directory first - see the note at the
+end of **Setup** above.
 
 ### Wiring it into other MCP clients
 
@@ -237,7 +255,8 @@ or validates it for you).
 src/
   util/mutex.ts      - promise-chaining async mutex (no built-in JS equivalent of asyncio.Lock)
   credentials.ts     - per-user credential file (Firebase-CLI style), outside the project
-  setup.ts           - `node src/setup.ts`, the one-time interactive login
+  setup.ts           - `node src/setup.ts`, the one-time interactive login (CLI path; `claude
+                       plugin configure jumia-vendor-mcp` is the other, via plugin.json's userConfig)
   config.ts          - env/config loading
   auth.ts            - OAuth2 refresh-token handling, with rotation persisted via credentials.ts
   http.ts            - rate limiting, retry/backoff, per-service error-shape normalization

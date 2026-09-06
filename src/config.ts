@@ -8,7 +8,17 @@
  * credentials.ts for the file format/location.
  *
  * Real environment variables can override either value, for CI/automation -
- * the same role Firebase CLI's FIREBASE_TOKEN env var plays there.
+ * the same role Firebase CLI's FIREBASE_TOKEN env var plays there. This is
+ * also how a Claude Code plugin install of this server can skip the
+ * terminal-based `node src/setup.ts` step entirely: `.claude-plugin/
+ * plugin.json` declares `userConfig.client_id`/`refresh_token`, which a user
+ * fills in via the in-session `/plugin configure jumia-vendor-mcp` slash
+ * command (Refresh Token
+ * goes into Claude Code's own secure credential storage, never a plaintext
+ * file), and the plugin manifest's `mcpServers.jumia-vendor-center.env`
+ * substitutes those values into exactly these two env vars at launch. An
+ * unset/empty override here is treated as absent and falls back to the
+ * stored credentials file, so the two setup paths don't conflict.
  * Everything else below is a plain, non-secret environment variable; there
  * is no .env file support at all.
  *
@@ -65,9 +75,10 @@ export async function loadSettings(deps: LoadSettingsDeps = { readCredentials: d
 
   if (missing.length > 0) {
     throw new Error(
-      `Missing required credential(s): ${missing.join(", ")}. Run \`node src/setup.ts\` to register your ` +
-        "Vendor Center Self Authorization application's Client Id and Refresh Token (stored outside this " +
-        "project, in your home directory - see credentials.ts). Never commit or paste the real values anywhere.",
+      `Missing required credential(s): ${missing.join(", ")}. Either run \`/plugin configure ` +
+        "jumia-vendor-mcp\` inside a Claude Code session and fill in the Client Id / Refresh Token fields " +
+        "(if installed as a Claude Code plugin), or run `node src/setup.ts` in a terminal to store them in " +
+        "your home directory instead - see credentials.ts. Never commit or paste the real values anywhere.",
     );
   }
 

@@ -2,10 +2,27 @@
   "name": "jumia-vendor-mcp",
   "description": "MCP server for the Jumia Vendor Center GPM (catalog) and GOP (orders) APIs",
   "version": "0.1.0",
+  "userConfig": {
+    "client_id": {
+      "type": "string",
+      "title": "Jumia Vendor Center Client Id",
+      "description": "From your own Vendor Center account: Settings -> Applications -> a Self Authorization application. Leave unset to use `node src/setup.ts` / ~/.config/jumia-vendor-mcp/credentials.json instead."
+    },
+    "refresh_token": {
+      "type": "string",
+      "title": "Jumia Vendor Center Refresh Token",
+      "description": "Generated from the same Self Authorization application via 'Generate Token'. Stored in Claude Code's secure credential storage, not in this plugin's files.",
+      "sensitive": true
+    }
+  },
   "mcpServers": {
     "jumia-vendor-center": {
       "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/src/server.ts"]
+      "args": ["${CLAUDE_PLUGIN_ROOT}/src/server.ts"],
+      "env": {
+        "JUMIA_CLIENT_ID": "${user_config.client_id}",
+        "JUMIA_REFRESH_TOKEN": "${user_config.refresh_token}"
+      }
     }
   }
 }
