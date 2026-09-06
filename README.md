@@ -3,12 +3,11 @@
 An MCP server for Jumia's Vendor Center API (GPM catalog + GOP orders), built
 against the OpenAPI spec published at
 `https://vendorcenter.jumia.com/api-docs/openapi.yaml` (fetched 2026-09-05).
-Implemented in TypeScript, run directly by Node (no build step) - mirroring
-the tooling of Firebase CLI, which this project's credential-storage pattern
-is itself modeled on.
+Implemented in TypeScript, run directly by Node (no build step).
 
 It exposes the catalog/order operations as MCP tools so an MCP client (Claude
-Desktop, Claude Code, Cowork, etc) can call them directly, plus two heuristic
+Desktop, Claude Code, Cursor, Windsurf, or any other MCP-compatible LLM tool)
+can call them directly, plus two heuristic
 "review list" tools (`find_outdated_products`, `find_duplicate_products`) for
 things the API has no native concept of - see **What's left out** below
 before you rely on those.
@@ -103,7 +102,14 @@ before you rely on those.
 
 This repo is itself a Claude Code plugin - `.claude-plugin/plugin.json` declares
 the `jumia-vendor-center` MCP server via `${CLAUDE_PLUGIN_ROOT}`, so it works
-from wherever it's cloned. Install it from a local marketplace pointed at this
+from wherever it's installed. Install it straight from GitHub:
+
+```bash
+claude plugin marketplace add damurka/jumia-vendor-mcp
+claude plugin install jumia-vendor-mcp@jumia-vendor-mcp
+```
+
+Or, if you've cloned it locally instead (e.g. for development), point at the
 directory:
 
 ```bash
@@ -111,26 +117,39 @@ claude plugin marketplace add /absolute/path/to/jumia-vendor-mcp
 claude plugin install jumia-vendor-mcp@jumia-vendor-mcp
 ```
 
-Or, for one-off/dev use without installing anything:
+Either way, `npm install` needs to have been run once in the plugin's own
+directory first - see the note at the end of **Setup** above; run `claude mcp
+list` if you don't know where that directory is.
+
+Then configure your credentials - inside a Claude Code session, run:
+
+```
+/plugin configure jumia-vendor-mcp
+```
+
+and fill in the Client Id and Refresh Token fields it prompts for (from
+**Setup** step 1-2 above). This is a slash command run inside a chat session,
+not a `claude plugin ...` shell subcommand. It's powered by `plugin.json`'s
+`userConfig` block, and the Refresh Token goes into Claude Code's own secure
+credential storage - never a plaintext file in this project.
+
+For one-off/dev use without installing anything:
 
 ```bash
 claude --plugin-dir /absolute/path/to/jumia-vendor-mcp
 ```
 
-Enter credentials via the `/plugin configure jumia-vendor-mcp` slash command
-inside a session (see **Setup** above) - this is the path made for exactly this install method,
-since `plugin.json`'s `userConfig` is what powers that command. The older
-`node src/setup.ts` / `~/.config/jumia-vendor-mcp/credentials.json` path
-still works too and isn't tied to `${CLAUDE_PLUGIN_ROOT}` at all - run it
-once and every install of this plugin on that machine picks it up,
-regardless of where it's cloned. Either way, `npm install` still needs to
-have been run once in the plugin's own directory first - see the note at the
-end of **Setup** above.
+The older `node src/setup.ts` / `~/.config/jumia-vendor-mcp/credentials.json`
+path (see **Setup** above) still works too, as an alternative to `/plugin
+configure` - it isn't tied to `${CLAUDE_PLUGIN_ROOT}` at all, so running it
+once covers every install of this plugin on that machine, regardless of
+where it's installed from.
 
-### Wiring it into other MCP clients
+### Wiring it into other LLM tools / MCP clients
 
-For Claude Desktop or any other client that isn't plugin-aware, register it
-directly as a stdio server (adjust the path):
+For Claude Desktop, Cursor, Windsurf, Cline, Zed, or any other MCP-compatible
+client that isn't plugin-aware, register it directly as a stdio server
+(adjust the path to wherever you cloned this repo):
 
 ```json
 {
@@ -142,6 +161,31 @@ directly as a stdio server (adjust the path):
   }
 }
 ```
+
+These clients don't have Claude Code's plugin `userConfig` mechanism, so
+credentials have to come from one of the two paths in **Setup** above: either
+`node src/setup.ts` (recommended - it's the one with live pre-validation), or
+by adding `JUMIA_CLIENT_ID`/`JUMIA_REFRESH_TOKEN` directly into that same
+JSON block's `env` object if the client supports one, e.g.:
+
+```json
+{
+  "mcpServers": {
+    "jumia-vendor-center": {
+      "command": "node",
+      "args": ["/absolute/path/to/jumia-vendor-mcp/src/server.ts"],
+      "env": {
+        "JUMIA_CLIENT_ID": "your-client-id",
+        "JUMIA_REFRESH_TOKEN": "your-refresh-token"
+      }
+    }
+  }
+}
+```
+
+Only do this in a config file that isn't checked into version control -
+unlike Claude Code's `userConfig`, this is a plaintext value sitting in a
+JSON file, not secure storage.
 
 ## What's here
 
