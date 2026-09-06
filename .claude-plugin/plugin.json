@@ -1,7 +1,7 @@
 {
   "name": "jumia-vendor-mcp",
   "description": "MCP server for the Jumia Vendor Center GPM (catalog) and GOP (orders) APIs",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "userConfig": {
     "client_id": {
       "type": "string",

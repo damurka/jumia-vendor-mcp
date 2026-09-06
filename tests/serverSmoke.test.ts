@@ -45,6 +45,9 @@ test("all expected tools are registered", () => {
     "list_products",
     "get_stock",
     "find_duplicate_products",
+    "find_variant_fragments",
+    "merge_variant_fragments",
+    "check_content_policy",
     "list_orders",
     "get_order_items",
     "cancel_order_items",
@@ -68,5 +71,23 @@ test("deactivate_products rejects an entry missing business_client_codes", async
   await assert.rejects(
     () => handler({ products: [{ id: "p1", sellerSku: "sku1" }] }),
     (err: Error) => err.message.includes("business_client_codes"),
+  );
+});
+
+test("create_products blocks locally on a known content-policy phrase, before any network call", async () => {
+  const internal = serverModule.server as unknown as InternalMcpServer;
+  const handler = internal._registeredTools.create_products.handler;
+  await assert.rejects(
+    () =>
+      handler({
+        shop_id: "shop1",
+        products: [
+          {
+            sellerSku: "sku1",
+            attributes: [{ name: "short_description", value: "Raised edges for camera and screen protection" }],
+          },
+        ],
+      }),
+    (err: Error) => err.message.includes("blacklist") && err.message.includes("sku1"),
   );
 });

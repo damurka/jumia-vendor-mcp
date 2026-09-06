@@ -380,3 +380,414 @@ export function findDuplicateCandidates(products: JsonRecord[], options: FindDup
 
   return clusters;
 }
+
+// ---------------------------------------------------------------------
+// Variant fragments: the same real item posted as separate PRODUCT SETS
+// per color, instead of one product set with a color variation under a
+// shared parentSku. findDuplicateCandidates() above deliberately does NOT
+// catch most of these - its fuzzy-name match requires near-identical names,
+// but two color-variant listings of the same case are routinely posted with
+// completely different titles by different sellers/times. Built from a live
+// audit of a real catalog (~700 phone-case listings; only ~50 were caught by
+// exact-title-after-color-strip matching, ~400+ more were genuine fragments
+// once brand+model+case-type clustering was used instead).
+//
+// This is intentionally domain-informed (phone-case brands/models/types),
+// not a universal heuristic - extend BRAND_PATTERNS/MODEL_PATTERNS/
+// CASE_TYPE_PATTERNS for other product categories rather than expecting this
+// to work unmodified on, say, apparel or electronics accessories in general.
+// ---------------------------------------------------------------------
+
+export const DEFAULT_COLOR_CANONICAL: Record<string, string> = {
+  black: "Black", blue: "Blue", purple: "Purple", maroon: "Maroon", burgundy: "Maroon",
+  "red/maroon": "Maroon", blacl: "Black", green: "Green", pink: "Pink", grey: "Grey",
+  gray: "Grey", "thin grey": "Grey", beige: "Beige", "beige nude": "Beige Nude",
+  "dark blue": "Dark Blue", "navy blue": "Navy Blue", navy: "Navy Blue", peach: "Peach",
+  white: "White", gold: "Gold", silver: "Silver", yellow: "Yellow", orange: "Orange",
+  brown: "Brown", teal: "Teal", red: "Red", "light pink": "Light Pink", clear: "Clear",
+  transparent: "Transparent",
+};
+
+/**
+ * Normalizes a raw color attribute value to a canonical display form, or
+ * `null` for garbage/ambiguous values (comma-lists like "black,grey,white",
+ * unrecognized strings) - callers should EXCLUDE the whole cluster a `null`
+ * came from rather than silently dropping just that listing or guessing at
+ * its color; a wrong guess here means merging the wrong photo/copy into a
+ * variant a customer actually ordered.
+ */
+export function normalizeColorValue(raw: unknown, canonical: Record<string, string> = DEFAULT_COLOR_CANONICAL): string | null {
+  if (!raw) return null;
+  const c = String(raw).toLowerCase().trim();
+  if (c.includes(",")) return null;
+  return canonical[c] ?? null;
+}
+
+function colorAttrOf(product: JsonRecord): string | undefined {
+  const attr = (product.attributes ?? []).find((a: JsonRecord) => a.name?.toLowerCase() === "color");
+  return attr?.value;
+}
+
+const BRAND_PATTERNS: Record<string, RegExp> = {
+  iphone: /iphone/i,
+  samsung: /samsung|\bgalaxy\b/i,
+  oppo: /\boppo\b/i,
+  xiaomi: /xiaomi|redmi|\bpoco\b/i,
+  realme: /\brealme\b/i,
+  infinix: /\binfinix\b/i,
+  tecno: /\btecno\b/i,
+  pixel: /\bpixel\b/i,
+};
+
+/** One capturing pattern per brand for its model number/name. */
+const MODEL_PATTERNS: Record<string, RegExp> = {
+  iphone: /iphone\s*(se\s*(2020|2022)?|\d{1,2}\s*(pro\s*max|promax|pro|plus|mini)?)/i,
+  samsung: /galaxy\s*(z\s*fold\s*\d+|z\s*flip\s*\d+|note\s*\d+\s*(ultra)?|a\d{2}[a-z]?\s*(5g|4g)?|s\d{2}\s*(ultra|plus|\+)?|m\d{2}\s*(5g)?)/i,
+  oppo: /(reno\s*\d+[a-z]*\s*(5g|4g|f)?|a\d{2,3}\s*(5g|4g)?|find\s*x\d*)/i,
+  xiaomi: /(redmi\s*(note\s*)?\d+[a-z]*\s*(pro|5g|4g)?|poco\s*[a-z]?\d+|mi\s*\d+[a-z]*)/i,
+  realme: /(c\d{2}s?|\d{1,2}\s*(pro)?)/i,
+  infinix: /(smart\s*\d+|camon\s*\d+\s*(pro)?|spark\s*\d+|note\s*\d+|hot\s*\d+)/i,
+  tecno: /(camon\s*\d+\s*(pro)?|spark\s*\d+|pova\s*\d+)/i,
+  pixel: /pixel\s*\d+[a-z]*\s*(pro)?/i,
+};
+
+function extractBrandModel(name: string): { brand: string; model: string } | null {
+  const lower = name.toLowerCase();
+  for (const [brand, brandRe] of Object.entries(BRAND_PATTERNS)) {
+    if (!brandRe.test(lower)) continue;
+    const modelRe = MODEL_PATTERNS[brand];
+    const m = lower.match(modelRe);
+    return { brand, model: m ? m[0].replace(/\s+/g, " ").trim() : "UNKNOWN" };
+  }
+  return null;
+}
+
+/**
+ * Case "type" - a physically/functionally different product, never a color
+ * of another type (a MagSafe case is not a "color variant" of a plain
+ * silicone one, and merging them would misrepresent both). Order matters:
+ * first match wins, so more specific brand-hardware terms are checked before
+ * generic ones.
+ */
+const CASE_TYPE_PATTERNS: Array<[string, RegExp]> = [
+  ["HARD-CASE-BRANDED", /nillkin|nilkin|camshield/i],
+  ["LEATHER/WALLET/FLIP", /leather|wallet|flip cover|book cover/i],
+  ["MAGSAFE/MAGNETIC", /magsafe|magnetic|wireless charging|electroplat/i],
+  ["STAND/HOLDER", /\bstand\b|\bholder\b/i],
+  ["MILITARY-GRADE", /military[- ]grade|drop[- ]proof|\barmor\b/i],
+  ["LIQUID-SILICONE", /liquid silicone|liquid slim|liquid case/i],
+  ["MICROFIBER-LINED", /microfib|micro fibre|micro fiber/i],
+  ["CLEAR/TRANSPARENT", /\bclear\b|transparent/i],
+  ["GLASS-SCREEN-ADJACENT", /\bglass\b|tempered/i],
+];
+
+export function classifyListingType(name: string): string {
+  for (const [type, re] of CASE_TYPE_PATTERNS) {
+    if (re.test(name)) return type;
+  }
+  return "PLAIN-SILICONE";
+}
+
+const BUNDLE_KEYWORDS = /bundle|screen protector|tempered glass|3-in-1|3 in 1|combo|kit\b/i;
+const DIFFERENT_MATERIAL_KEYWORDS = /carbon fiber|leather|wallet|flip cover|electroplat/i;
+
+/**
+ * Anomalies worth a human's attention before merging a candidate cluster -
+ * every one of these was a REAL bug caught this way in a live catalog (a
+ * carbon-fiber case hiding under a color name in a "plain silicone" cluster,
+ * a 3-in-1 bundle mixed in with single cases, a weight field in the wrong
+ * unit, one listing priced 2x its cluster-mates because it was secretly a
+ * different product). None of these are proof of a real problem by
+ * themselves - `DIFFERENT_MATERIAL`/`BUNDLE_KEYWORD` in particular fire on
+ * marketing copy that merely *mentions* an accessory (e.g. "attaches to
+ * MagSafe wallets") - so read the flagged item's actual description before
+ * excluding it, don't auto-exclude on the flag alone.
+ */
+function detectAnomalies(items: Array<{ name: string; price?: number; product: JsonRecord }>): string[] {
+  const flags: string[] = [];
+  const prices = items.map((it) => it.price).filter((p): p is number => typeof p === "number");
+  if (prices.length >= 2) {
+    const min = Math.min(...prices);
+    const max = Math.max(...prices);
+    if (min > 0 && max / min > 1.8) flags.push(`PRICE_OUTLIER: range ${min}-${max} (ratio ${(max / min).toFixed(1)})`);
+  }
+  for (const it of items) {
+    const desc: string = it.product.description ?? "";
+    const bundleMatch = desc.match(BUNDLE_KEYWORDS);
+    if (bundleMatch) flags.push(`BUNDLE_KEYWORD in "${it.name}": ${bundleMatch[0]}`);
+    const materialMatch = desc.match(DIFFERENT_MATERIAL_KEYWORDS);
+    if (materialMatch) flags.push(`DIFFERENT_MATERIAL in "${it.name}": ${materialMatch[0]}`);
+    const weight = (it.product.attributes ?? []).find((a: JsonRecord) => a.name?.toLowerCase() === "product_weight")?.value;
+    if (weight && (String(weight).includes("g") || Number(weight) > 0.15 || Number(weight) < 0.005)) {
+      flags.push(`WEIGHT_ANOMALY in "${it.name}": ${weight}`);
+    }
+  }
+  return flags;
+}
+
+export interface VariantFragmentItem {
+  product: JsonRecord;
+  name: string;
+  color: string;
+  price: number | undefined;
+  variationId: string | undefined;
+  sellerSku: string | undefined;
+  categoryCode: string | undefined;
+}
+
+export interface VariantFragmentCluster {
+  key: string; // "brand | model | type"
+  brand: string;
+  model: string;
+  type: string;
+  colors: string[];
+  items: VariantFragmentItem[];
+  flags: string[];
+}
+
+export interface FindVariantFragmentsOptions {
+  colorCanonical?: Record<string, string>;
+  minColors?: number;
+}
+
+/**
+ * Groups product SETS that look like the same case posted once per color,
+ * by (brand, model, case-type) rather than by name similarity - see the
+ * module comment above for why findDuplicateCandidates' fuzzy-name match
+ * misses most of these. Returns candidate clusters only (>= minColors
+ * distinct, recognized colors) with anomaly flags for human review; this
+ * NEVER merges or writes anything. Feed a cluster (after you've resolved its
+ * flags, and dropped/fixed any bad items) into buildVariantMergePayload() to
+ * get an actual create_products/deactivate payload.
+ */
+export function findVariantFragments(products: JsonRecord[], options: FindVariantFragmentsOptions = {}): VariantFragmentCluster[] {
+  const canonical = options.colorCanonical ?? DEFAULT_COLOR_CANONICAL;
+  const minColors = options.minColors ?? 2;
+
+  const buckets = new Map<string, { brand: string; model: string; type: string; items: VariantFragmentItem[] }>();
+
+  for (const product of products) {
+    const name: string = product.name ?? "";
+    const bm = extractBrandModel(name);
+    if (!bm || bm.model === "UNKNOWN") continue;
+    const type = classifyListingType(name);
+    const key = `${bm.brand} | ${bm.model} | ${type}`;
+    const variation = product.variations?.[0];
+    const item: VariantFragmentItem = {
+      product,
+      name,
+      color: colorAttrOf(product) ?? "",
+      price: variation?.globalPrice?.value,
+      variationId: variation?.id,
+      sellerSku: variation?.sellerSku,
+      categoryCode: product.category?.code,
+    };
+    const bucket = buckets.get(key);
+    if (bucket) bucket.items.push(item);
+    else buckets.set(key, { brand: bm.brand, model: bm.model, type, items: [item] });
+  }
+
+  const clusters: VariantFragmentCluster[] = [];
+  for (const [key, bucket] of buckets) {
+    const colors = new Set<string>();
+    for (const it of bucket.items) {
+      const c = normalizeColorValue(it.color, canonical);
+      if (c) colors.add(c);
+    }
+    if (colors.size < minColors) continue;
+    clusters.push({
+      key,
+      brand: bucket.brand,
+      model: bucket.model,
+      type: bucket.type,
+      colors: [...colors],
+      items: bucket.items,
+      flags: detectAnomalies(bucket.items),
+    });
+  }
+  return clusters;
+}
+
+// ---------------------------------------------------------------------
+// Building a merge payload from a (human-reviewed) variant fragment cluster
+// ---------------------------------------------------------------------
+
+const COLOR_WORDS_FOR_STRIP = [...new Set(Object.values(DEFAULT_COLOR_CANONICAL).map((c) => c.toLowerCase()).concat(Object.keys(DEFAULT_COLOR_CANONICAL)))].sort(
+  (a, b) => b.length - a.length,
+);
+
+function stripColorAndPunct(title: string): string {
+  let s = title.replace(/[–—]/g, "-");
+  for (const c of COLOR_WORDS_FOR_STRIP) {
+    s = s.replace(new RegExp(`\\b${c}\\b`, "gi"), " ");
+  }
+  s = s.replace(/\(\s*\)/g, " ");
+  s = s.replace(/[-,]\s*$/g, "");
+  s = s.replace(/^[-,\s]+/, "");
+  s = s.replace(/\s{2,}/g, " ").trim();
+  return s.replace(/[-,]\s*$/g, "").trim();
+}
+
+/** Strips any mention of the cluster's OTHER colors from shared body copy before it's reused across every variant. */
+export function genericizeBodyText(text: string | undefined, colorsInCluster: string[]): string {
+  if (!text) return "";
+  const colors = [...colorsInCluster].sort((a, b) => b.length - a.length);
+  let s = text;
+  for (const c of colors) {
+    s = s.replace(new RegExp(`\\(\\s*${c}\\s*\\)`, "gi"), "");
+    s = s.replace(new RegExp(`[-–]\\s*${c}\\b`, "gi"), "");
+    s = s.replace(new RegExp(`\\b${c}\\s+(finish|case|cover)\\b`, "gi"), "$1");
+    s = s.replace(new RegExp(`\\b${c}\\b`, "gi"), "");
+  }
+  return s.replace(/\s{2,}/g, " ").replace(/\s+([.,;:!?])/g, "$1").trim();
+}
+
+function attrValueOf(p: JsonRecord, name: string): string | undefined {
+  return (p.attributes ?? []).find((a: JsonRecord) => a.name?.toLowerCase() === name.toLowerCase())?.value;
+}
+
+export interface BuildVariantMergePayloadOptions {
+  category?: { code: string; name: string };
+  nameOverride?: string;
+  weightOverride?: string;
+}
+
+export interface VariantMergeResult {
+  createPayload: JsonRecord[];
+  deactivateList: Array<{ id: string; sellerSku: string; business_client_code: string }>;
+  genericName: string;
+}
+
+/**
+ * Turns one (already human-reviewed) VariantFragmentCluster into a ready-to-
+ * submit create_products payload plus the deactivate list for everything it
+ * supersedes. Per color: highest price wins as the kept listing, everything
+ * else at that color becomes a deactivation entry alongside every other
+ * color's loser. The shared description/short_description/package_content
+ * come from whichever winner's (color-stripped) body text is the MODAL
+ * match across all winners - not simply the longest one - so an outlier
+ * listing's one-off claim (an extra feature, a wrong model mention) can't
+ * become the copy every color inherits. Does NOT include `stock` - look
+ * that up per winning variationId (get_stock) and set it before calling
+ * create_products, same as every other consolidation this session.
+ */
+export function buildVariantMergePayload(
+  cluster: VariantFragmentCluster,
+  businessClientCode: string,
+  options: BuildVariantMergePayloadOptions = {},
+): VariantMergeResult {
+  const byColor = new Map<string, VariantFragmentItem[]>();
+  for (const it of cluster.items) {
+    const color = normalizeColorValue(it.color) ?? it.color;
+    if (!color) continue;
+    const list = byColor.get(color);
+    if (list) list.push(it);
+    else byColor.set(color, [it]);
+  }
+
+  const winners: Array<{ color: string; item: VariantFragmentItem }> = [];
+  const losers: VariantFragmentItem[] = [];
+  for (const [color, items] of byColor) {
+    const sorted = [...items].sort((a, b) => (b.price ?? 0) - (a.price ?? 0));
+    winners.push({ color, item: sorted[0] });
+    losers.push(...sorted.slice(1));
+  }
+
+  const colors = winners.map((w) => w.color);
+  const normDescCounts = new Map<string, Array<{ color: string; item: VariantFragmentItem }>>();
+  for (const w of winners) {
+    const norm = genericizeBodyText(w.item.product.description, colors).toLowerCase().replace(/\s+/g, " ").trim();
+    const list = normDescCounts.get(norm);
+    if (list) list.push(w);
+    else normDescCounts.set(norm, [w]);
+  }
+  let bestGroup: Array<{ color: string; item: VariantFragmentItem }> = [];
+  for (const grp of normDescCounts.values()) if (grp.length > bestGroup.length) bestGroup = grp;
+  const template = (bestGroup[0] ?? winners[0]).item.product;
+
+  const genericName = options.nameOverride ?? stripColorAndPunct(template.name ?? "");
+  const genericDescription = genericizeBodyText(template.description, colors);
+  const shortDesc = genericizeBodyText(attrValueOf(template, "short_description"), colors);
+  const packageContent = genericizeBodyText(attrValueOf(template, "package_content"), colors);
+  const weight = options.weightOverride ?? attrValueOf(template, "product_weight") ?? "0.02";
+  const material = attrValueOf(template, "main_material") ?? "Silicone";
+  const modelAttr = attrValueOf(template, "model") ?? genericName;
+  const category = options.category ?? template.category ?? { code: "", name: "" };
+  const brand = template.brand ?? {};
+
+  const seenUrls = new Set<string>();
+  const images: JsonRecord[] = [];
+  for (const it of cluster.items) {
+    for (const img of it.product.images ?? []) {
+      if (!img.url || seenUrls.has(img.url)) continue;
+      seenUrls.add(img.url);
+      images.push({ url: img.url, primary: images.length === 0 });
+    }
+  }
+
+  const parentSku = `${genericName} - ${winners[0].color}`;
+  const createPayload = winners.map((w) => ({
+    name: { value: genericName, translations: [{ language: "en", value: genericName }] },
+    description: { value: genericDescription, translations: [{ language: "en", value: genericDescription }] },
+    sellerSku: `${genericName} - ${w.color}`,
+    parentSku,
+    variation: w.color,
+    brand,
+    category,
+    images,
+    price: { currency: "KES", value: w.item.price },
+    attributes: [
+      { name: "short_description", value: shortDesc },
+      { name: "product_weight", value: weight },
+      { name: "main_material", value: material },
+      { name: "model", value: modelAttr },
+      { name: "package_content", value: packageContent },
+      { name: "color", value: w.color },
+    ],
+  }));
+
+  const deactivateList = [...winners.map((w) => w.item), ...losers]
+    .filter((it) => it.variationId && it.sellerSku)
+    .map((it) => ({ id: it.variationId as string, sellerSku: it.sellerSku as string, business_client_code: businessClientCode }));
+
+  return { createPayload, deactivateList, genericName };
+}
+
+// ---------------------------------------------------------------------
+// Content policy pre-check
+// ---------------------------------------------------------------------
+
+/**
+ * Phrases confirmed LIVE to be on Jumia Kenya's word blacklist - discovered
+ * the hard way (a create_products call rejected with "The highlighted word
+ * has been placed on the blacklist, prohibiting its usage in Kenya", the
+ * exact same phrase tripping two unrelated listings' short_description on
+ * the same day). This is NOT an exhaustive list of Jumia's actual blacklist
+ * (which isn't published) - it only grows as new rejections are observed
+ * live. Treat a clean scan as "nothing we've seen before", not "guaranteed
+ * to pass".
+ */
+export const KNOWN_CONTENT_BLACKLIST: string[] = ["screen protection"];
+
+export interface ContentPolicyIssue {
+  field: string;
+  phrase: string;
+}
+
+/**
+ * Scans the text fields Jumia actually validates (name, description, and
+ * any attribute value) against KNOWN_CONTENT_BLACKLIST before you spend an
+ * API round-trip finding out live. `fields` should be {name: text}, e.g.
+ * {description: "...", short_description: "...", package_content: "..."}.
+ */
+export function scanContentPolicy(fields: Record<string, string | undefined>, blacklist: string[] = KNOWN_CONTENT_BLACKLIST): ContentPolicyIssue[] {
+  const issues: ContentPolicyIssue[] = [];
+  for (const [field, text] of Object.entries(fields)) {
+    if (!text) continue;
+    const lower = text.toLowerCase();
+    for (const phrase of blacklist) {
+      if (lower.includes(phrase.toLowerCase())) issues.push({ field, phrase });
+    }
+  }
+  return issues;
+}

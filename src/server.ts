@@ -70,7 +70,7 @@ import { VendorApiHttp } from "./http.ts";
 import { Mutex } from "./util/mutex.ts";
 
 export const server = new McpServer(
-  { name: "jumia-vendor-center", version: "0.1.0" },
+  { name: "jumia-vendor-center", version: "0.2.0" },
   {
     instructions:
       "Tools for Jumia Vendor Center (GPM catalog + GOP order APIs). Read each tool's description before " +
@@ -106,6 +106,47 @@ async function getCtx(): Promise<{ client: VendorApiClient; audit: AuditLog }> {
 
 function jsonResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
+}
+
+/**
+ * Pulls the text fields Jumia's content-policy validator actually looks at
+ * out of a loosely-typed create/update-products payload item, for
+ * heuristics.scanContentPolicy(). Deliberately permissive about shape since
+ * callers build this payload freehand (see create_products' schema).
+ */
+function extractTextFields(product: JsonRecord): Record<string, string | undefined> {
+  const fields: Record<string, string | undefined> = {
+    name: typeof product.name === "string" ? product.name : product.name?.value,
+    description: typeof product.description === "string" ? product.description : product.description?.value,
+  };
+  for (const attr of product.attributes ?? []) {
+    if (attr?.name && typeof attr.value === "string") fields[attr.name] = attr.value;
+  }
+  return fields;
+}
+
+/**
+ * Blocks a create/update call locally, before it ever reaches the API, if
+ * any product's text contains a phrase already confirmed to trip Jumia's
+ * word blacklist - see heuristics.KNOWN_CONTENT_BLACKLIST's docstring for
+ * why this is a known-issues list, not a guarantee. Saves the round-trip for
+ * an error we've already seen live; anything not on the list still only
+ * surfaces from the real API response, same as before this check existed.
+ */
+function assertContentPolicy(products: JsonRecord[]): void {
+  const perProduct = products.map((p) => ({
+    sellerSku: p.sellerSku,
+    issues: heuristics.scanContentPolicy(extractTextFields(p)),
+  }));
+  const withIssues = perProduct.filter((p) => p.issues.length > 0);
+  if (withIssues.length === 0) return;
+  const detail = withIssues
+    .map((p) => `  ${JSON.stringify(p.sellerSku)}: ${p.issues.map((i) => `${i.field}="${i.phrase}"`).join(", ")}`)
+    .join("\n");
+  throw new Error(
+    "Blocked before calling the API: text matches a phrase already confirmed on Jumia's word blacklist " +
+      `(see heuristics.KNOWN_CONTENT_BLACKLIST). Reword the flagged field(s) and retry:\n${detail}`,
+  );
 }
 
 /**
@@ -279,20 +320,26 @@ server.registerTool(
   "deactivate_products",
   {
     description:
-      'The closest thing to "removing" a product from Jumia: sets status to INACTIVE per business client. ' +
-      "THIS DOES NOT DELETE THE LISTING - there is no delete endpoint in the published API; INACTIVE just " +
-      "makes it unsellable/hidden. If you actually need a listing permanently gone, that's a request to " +
-      "your Jumia account manager, not something this tool (or any seller-facing API call) can do.\n\n" +
+      'The closest thing to "removing" a product from Jumia: zeroes stock, then sets status to INACTIVE per ' +
+      "business client. THIS DOES NOT DELETE THE LISTING - there is no delete endpoint in the published " +
+      "API; INACTIVE just makes it unsellable/hidden. If you actually need a listing permanently gone, " +
+      "that's a request to your Jumia account manager, not something this tool (or any seller-facing API " +
+      "call) can do.\n\n" +
+      "Automatically zeroes stock first: a listing that goes INACTIVE with nonzero stock still recorded " +
+      "looks like a bug to anyone reading the catalog later, and this was a manually-repeated two-step " +
+      "policy (update_stock then deactivate_products) often enough that it belongs in one call.\n\n" +
       '`products`: [{"id": "<productSid, i.e. variation_id>", "sellerSku": "...", ' +
       '"business_client_codes": ["jumia-ng", ...]}] (accepts a singular "business_client_code" string too, ' +
       "for convenience when acting on one find_outdated_products listing at a time - those rows already " +
       'have "variation_id"/"seller_sku"/"business_client_code" under exactly those names, just rename ' +
-      "variation_id -> id).\n\nLogs every call to the local audit log before returning.",
+      "variation_id -> id).\n\nReturns {stockFeedId, statusFeedId} - both are independent async feeds (same " +
+      "as every other write tool here), so poll each with get_feed_status rather than assuming completion. " +
+      "Logs both steps to the local audit log before returning.",
     inputSchema: z.object({ products: z.array(deactivateProductItem) }),
   },
   async ({ products }) => {
     const { client, audit } = await getCtx();
-    const payload = products.map((p) => {
+    const codesByProduct = products.map((p) => {
       const codes = p.business_client_codes ?? (p.business_client_code ? [p.business_client_code] : undefined);
       if (!codes) {
         throw new Error(
@@ -301,15 +348,24 @@ server.registerTool(
             "see which business clients it's live on before deactivating, rather than guessing.",
         );
       }
-      return {
-        id: p.id,
-        sellerSku: p.sellerSku,
-        businessClients: codes.map((c) => ({ businessClientCode: c, status: "INACTIVE" })),
-      };
+      return { ...p, codes };
     });
 
-    const result = await withAudit(client, audit, "deactivate_products", payload, () => client.updateStatus(payload));
-    return jsonResult(result);
+    const stockPayload = codesByProduct.map((p) => ({ id: p.id, sellerSku: p.sellerSku, stock: 0 }));
+    const statusPayload = codesByProduct.map((p) => ({
+      id: p.id,
+      sellerSku: p.sellerSku,
+      businessClients: p.codes.map((c) => ({ businessClientCode: c, status: "INACTIVE" })),
+    }));
+
+    const stockResult = await withAudit(client, audit, "deactivate_products.zero_stock", stockPayload, () =>
+      client.updateStock(stockPayload),
+    );
+    const statusResult = await withAudit(client, audit, "deactivate_products.set_inactive", statusPayload, () =>
+      client.updateStatus(statusPayload),
+    );
+
+    return jsonResult({ stockFeedId: (stockResult as JsonRecord).feedId, statusFeedId: (statusResult as JsonRecord).feedId });
   },
 );
 
@@ -357,11 +413,16 @@ server.registerTool(
       "be flagged to the user as an unverified estimate rather than silently guessed.\n\n" +
       "Cap ~1000 products per call - this tool does not auto-chunk larger lists for you (chunk them " +
       "yourself and call this repeatedly, tracking each feedId, so a failure in batch 6 doesn't force " +
-      "you to redo 1-5).",
+      "you to redo 1-5).\n\n" +
+      "Text fields are checked against heuristics.KNOWN_CONTENT_BLACKLIST before this ever calls the API - " +
+      "a match throws locally with the offending sellerSku/field so you can reword and retry without " +
+      "wasting a round-trip. That list is only what's been confirmed live so far (not exhaustive); a clean " +
+      "check here doesn't guarantee Jumia's own validator will pass it.",
     inputSchema: z.object({ shop_id: z.string(), products: z.array(z.record(z.string(), z.unknown())) }),
   },
   async ({ shop_id, products }) => {
     const { client, audit } = await getCtx();
+    assertContentPolicy(products as JsonRecord[]);
     const result = await withAudit(client, audit, "create_products", { shopId: shop_id, count: products.length }, () =>
       client.createProducts(shop_id, products),
     );
@@ -378,11 +439,13 @@ server.registerTool(
       "category, parent SKU, price, or initial stock - use update_price / update_stock for price and " +
       "stock, and be aware main image/category/parent SKU aren't changeable via this API at all once a " +
       "product is created.\n\nEach item needs the product's `id` (productSid) plus whichever fields " +
-      "you're changing.",
+      "you're changing.\n\nText fields are checked against heuristics.KNOWN_CONTENT_BLACKLIST before this " +
+      "calls the API - see create_products' description for why.",
     inputSchema: z.object({ products: z.array(z.record(z.string(), z.unknown())) }),
   },
   async ({ products }) => {
     const { client, audit } = await getCtx();
+    assertContentPolicy(products as JsonRecord[]);
     const result = await withAudit(client, audit, "update_products", { count: products.length }, () => client.updateProducts(products));
     return jsonResult(result);
   },
@@ -638,6 +701,104 @@ server.registerTool(
       scanned: products.length,
       clusters: clusters.map((c) => ({ reason: c.reason, suggested_canonical: c.suggestedCanonical, products: c.products })),
     });
+  },
+);
+
+// ======================================================================
+// 6b. Variant fragments - the same item posted once per color instead of
+// one product with a color variation
+// ======================================================================
+
+server.registerTool(
+  "find_variant_fragments",
+  {
+    description:
+      "Flag clusters of products that look like the same real item (a phone case, most of the time) " +
+      "posted as a SEPARATE product per color, instead of one product with a color variation under a " +
+      "shared parentSku. Different from find_duplicate_products: that tool needs near-identical names, " +
+      "which two color-variant listings of the same case routinely do NOT have (different sellers/times, " +
+      "wildly different title phrasing) - this one clusters by (brand, model, case-type) extracted from " +
+      "the name instead, which is domain-informed for phone-case listings specifically (see " +
+      "heuristics.ts's BRAND_PATTERNS/MODEL_PATTERNS/CASE_TYPE_PATTERNS - extend those for other product " +
+      "categories).\n\n" +
+      "Returns candidate clusters only (>= min_colors distinct, recognized colors), each with `flags`: " +
+      "anomalies worth checking BEFORE merging (a price 2x the rest of the cluster, a 'bundle'/'screen " +
+      "protector' mention meaning it's actually a different product, a weight in an inconsistent unit, " +
+      "material keywords like 'leather'/'carbon fiber' suggesting a different physical product than its " +
+      "cluster-mates). A flag is a prompt to go read that item's actual description, not proof of a real " +
+      "problem - it can fire on marketing copy that only *mentions* an accessory. This NEVER merges or " +
+      "writes anything; review the clusters (drop/fix flagged items, confirm the colors), then pass ONE " +
+      "cluster into merge_variant_fragments to build the actual payload.",
+    inputSchema: z.object({
+      category_code: z.string().optional(),
+      shop_id: z.string().optional(),
+      max_products_scanned: z.number().int().default(3000),
+      min_colors: z.number().int().default(2),
+    }),
+  },
+  async ({ category_code, shop_id, max_products_scanned, min_colors }) => {
+    const { client } = await getCtx();
+    const products: JsonRecord[] = [];
+    for await (const p of client.iterAllProducts({ categoryCode: category_code, shopId: shop_id, cached: true })) {
+      products.push(p);
+      if (products.length >= max_products_scanned) break;
+    }
+    const clusters = heuristics.findVariantFragments(products, { minColors: min_colors });
+    return jsonResult({ scanned: products.length, clusters });
+  },
+);
+
+server.registerTool(
+  "merge_variant_fragments",
+  {
+    description:
+      "Turns ONE (already reviewed) cluster from find_variant_fragments into a ready-to-submit " +
+      "create_products payload plus the deactivate list for everything it supersedes. Per color: highest " +
+      "price wins as the kept listing; every other listing at that color (and every other color) becomes a " +
+      "deactivation entry. Shared description/short_description/package_content come from whichever " +
+      "winner's copy is the MODAL match across all winners (after stripping color words) - not simply the " +
+      "longest - so one outlier listing's stray claim can't become what every color inherits.\n\n" +
+      "This is a pure builder - it does NOT call create_products or deactivate_products itself, and it " +
+      "does NOT include `stock` in the result (look that up per winning variationId via get_stock and set " +
+      "it yourself before calling create_products, same as every prior consolidation this session). Submit " +
+      "the returned createPayload through the real create_products tool so it's visible/audited like any " +
+      "other write, then look up live stock for the deactivateList and run it through deactivate_products.",
+    inputSchema: z.object({
+      cluster: z.record(z.string(), z.unknown()),
+      business_client_code: z.string(),
+      category: z.object({ code: z.string(), name: z.string() }).optional(),
+      name_override: z.string().optional(),
+      weight_override: z.string().optional(),
+    }),
+  },
+  async ({ cluster, business_client_code, category, name_override, weight_override }) => {
+    const result = heuristics.buildVariantMergePayload(cluster as unknown as heuristics.VariantFragmentCluster, business_client_code, {
+      category,
+      nameOverride: name_override,
+      weightOverride: weight_override,
+    });
+    return jsonResult(result);
+  },
+);
+
+// ======================================================================
+// 6c. Content policy pre-check
+// ======================================================================
+
+server.registerTool(
+  "check_content_policy",
+  {
+    description:
+      "Scans text fields against heuristics.KNOWN_CONTENT_BLACKLIST - phrases already confirmed live to " +
+      "trip Jumia's word blacklist (currently just 'screen protection', discovered via two real " +
+      "create_products rejections). create_products/update_products already run this automatically and " +
+      "block on a match; call this standalone to check copy BEFORE building a full payload, e.g. while " +
+      "drafting a description. A clean result means 'nothing we've seen fail before', not 'guaranteed to " +
+      "pass' - Jumia's actual blacklist isn't published and is almost certainly larger than this.",
+    inputSchema: z.object({ fields: z.record(z.string(), z.string()) }),
+  },
+  async ({ fields }) => {
+    return jsonResult({ issues: heuristics.scanContentPolicy(fields) });
   },
 );
 
